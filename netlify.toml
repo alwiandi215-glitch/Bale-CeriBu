@@ -1,0 +1,13 @@
+[build]
+  command = "npm run build"
+  publish = "dist"
+
+[build.environment]
+  NODE_VERSION = "18"
+
+# SPA fallback: semua rute diarahkan ke index.html agar React Router
+# tidak menghasilkan 404 saat halaman di-refresh / diakses langsung.
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200
