@@ -9,8 +9,8 @@ import { LoadingSkeleton } from '@/components/common/LoadingSkeleton';
 export default function DashboardPage() {
   const { profile } = useAuth();
   const { summary, monthly } = useDashboard();
-  if (summary.isLoading) return <LoadingSkeleton rows={4} />;
-  const s = summary.data!;
+  if (summary.isLoading || !summary.data) return <LoadingSkeleton rows={4} />;
+  const s = summary.data;
 
   return (
     <div className="space-y-6">
