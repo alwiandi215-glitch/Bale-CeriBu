@@ -1,0 +1,401 @@
+// ============================================================
+// BALE CERIBU — Prisma schema (PostgreSQL)
+// Mencakup 15 modul: auth/keamanan, manajemen pengguna, data pasien,
+// skrining EPDS, rule engine/skoring, CDSS, edukasi, intervensi,
+// rujukan, monitoring/reminder, analitik, laporan, audit log,
+// pengaturan sistem, dan integrasi (SATUSEHAT/BPJS/WhatsApp).
+// ============================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+// ----------------------------- ENUMS -----------------------------
+
+enum Role {
+  SUPER_ADMIN // administrator sistem
+  ADMIN_FASKES // admin fasilitas kesehatan
+  DOKTER // dokter / psikolog klinis
+  BIDAN // bidan / perawat skrining
+  KADER // kader kesehatan masyarakat
+  PETUGAS_DINAS // dinas kesehatan (akses agregat)
+  IBU // ibu hamil / postpartum (akun mandiri / self-service)
+}
+
+enum UserStatus {
+  ACTIVE
+  INACTIVE
+  LOCKED
+}
+
+enum PatientStatus {
+  PREGNANT // hamil
+  POSTPARTUM // pascapersalinan
+  INACTIVE
+}
+
+enum ScreeningStatus {
+  DRAFT // auto-save belum selesai
+  COMPLETED // selesai & terskor
+  REVIEWED // sudah ditinjau klinisi
+}
+
+enum RiskLevel {
+  LOW
+  MEDIUM
+  HIGH
+}
+
+enum InterventionStatus {
+  PLANNED
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
+}
+
+enum ReferralStatus {
+  DRAFT
+  SENT
+  ACCEPTED
+  IN_TREATMENT
+  CLOSED
+  REJECTED
+}
+
+enum ReminderChannel {
+  WHATSAPP
+  SMS
+  EMAIL
+  IN_APP
+}
+
+enum ReminderStatus {
+  SCHEDULED
+  SENT
+  FAILED
+  CANCELLED
+}
+
+enum IntegrationProvider {
+  SATUSEHAT
+  BPJS
+  WHATSAPP
+}
+
+enum IntegrationLogStatus {
+  SUCCESS
+  FAILED
+}
+
+// --------------------------- MODUL 1, 2 --------------------------
+// Autentikasi, keamanan, dan manajemen pengguna.
+
+model Facility {
+  id            String    @id @default(cuid())
+  name          String
+  code          String    @unique // kode faskes / kode Satusehat org
+  type          String    @default("PUSKESMAS") // PUSKESMAS, RS, KLINIK, POSYANDU
+  satusehatOrgId String?
+  address       String?
+  district      String? // kecamatan
+  city          String? // kab/kota
+  province      String?   @default("Nusa Tenggara Barat")
+  phone         String?
+  active        Boolean   @default(true)
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  users      User[]
+  patients   Patient[]
+  referralsFrom Referral[] @relation("ReferralOrigin")
+  referralsTo   Referral[] @relation("ReferralDestination")
+
+  @@index([city, district])
+}
+
+model User {
+  id              String     @id @default(cuid())
+  email           String     @unique
+  passwordHash    String
+  fullName        String
+  role            Role       @default(BIDAN)
+  status          UserStatus @default(ACTIVE)
+  phone           String?
+  facilityId      String?
+  facility        Facility?  @relation(fields: [facilityId], references: [id], onDelete: SetNull)
+
+  // Keamanan akun
+  failedLoginCount Int       @default(0)
+  lockedUntil      DateTime?
+  lastLoginAt      DateTime?
+  passwordChangedAt DateTime @default(now())
+  mustChangePassword Boolean @default(false)
+
+  createdAt       DateTime   @default(now())
+  updatedAt       DateTime   @updatedAt
+
+  // Bila role = IBU, akun ini tertaut ke satu data pasien (self-service).
+  patient         Patient?         @relation("PatientAccount")
+
+  sessions        Session[]
+  screenings      Screening[]      @relation("ScreenedBy")
+  reviewedScreenings Screening[]   @relation("ReviewedBy")
+  interventions   Intervention[]
+  referrals       Referral[]
+  auditLogs       AuditLog[]
+  activityLogs    ActivityLog[]
+
+  @@index([role, facilityId])
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  userId       String
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenId      String   @unique // jti dari JWT (untuk revoke)
+  userAgent    String?
+  ipAddress    String?
+  expiresAt    DateTime
+  revokedAt    DateTime?
+  createdAt    DateTime @default(now())
+
+  @@index([userId])
+}
+
+// ----------------------------- MODUL 3 ---------------------------
+// Manajemen data pasien.
+
+model Patient {
+  id            String        @id @default(cuid())
+  mrn           String        @unique // nomor rekam medis internal
+  nik           String?       @unique // NIK (terenkripsi di layer aplikasi)
+  satusehatId   String?       // IHS patient id
+  bpjsNumber    String?
+  fullName      String
+  birthDate     DateTime?
+  phone         String?
+  address       String?
+  district      String?
+  city          String?
+  status        PatientStatus @default(PREGNANT)
+  gestationalAge Int?         // usia kehamilan (minggu)
+  expectedDelivery DateTime?
+  deliveryDate  DateTime?
+  facilityId    String?
+  facility      Facility?     @relation(fields: [facilityId], references: [id], onDelete: SetNull)
+  // Akun login mandiri milik ibu (opsional; portal pasien).
+  userId        String?       @unique
+  account       User?         @relation("PatientAccount", fields: [userId], references: [id], onDelete: SetNull)
+  consentGiven  Boolean       @default(false)
+  consentAt     DateTime?
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+
+  screenings    Screening[]
+  interventions Intervention[]
+  referrals     Referral[]
+  reminders     Reminder[]
+
+  @@index([facilityId, status])
+  @@index([fullName])
+}
+
+// -------------------------- MODUL 4, 5, 6 ------------------------
+// Skrining EPDS + auto-save, rule engine/skoring, klasifikasi & CDSS.
+
+model Screening {
+  id            String          @id @default(cuid())
+  patientId     String
+  patient       Patient         @relation(fields: [patientId], references: [id], onDelete: Cascade)
+  screenedById  String
+  screenedBy    User            @relation("ScreenedBy", fields: [screenedById], references: [id])
+  reviewedById  String?
+  reviewedBy    User?           @relation("ReviewedBy", fields: [reviewedById], references: [id])
+
+  status        ScreeningStatus @default(DRAFT)
+  // answers: array 10 nilai 0-3 (item 1..10); null bila belum dijawab (auto-save).
+  answers       Json            @default("[]")
+  totalScore    Int?
+  riskLevel     RiskLevel?
+  highAlert     Boolean         @default(false)
+  item10Score   Int?            // skor item-10 (pikiran menyakiti diri)
+
+  // Hasil CDSS (snapshot rekomendasi pada saat skrining).
+  cdssVersion   String?
+  cdssOutput    Json?
+
+  startedAt     DateTime        @default(now())
+  completedAt   DateTime?
+  reviewedAt    DateTime?
+  updatedAt     DateTime        @updatedAt
+
+  interventions Intervention[]
+  referrals     Referral[]
+
+  @@index([patientId])
+  @@index([riskLevel, highAlert])
+  @@index([status, completedAt])
+}
+
+// --------------------------- MODUL 7 -----------------------------
+// Edukasi pasien (materi + pemberian materi ke pasien).
+
+model EducationMaterial {
+  id          String   @id @default(cuid())
+  slug        String   @unique
+  title       String
+  category    String   // mis. "postpartum", "kecemasan", "dukungan-keluarga"
+  riskTarget  RiskLevel?
+  summary     String
+  contentMd   String   // konten markdown
+  mediaUrl    String?
+  published   Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+// --------------------------- MODUL 8 -----------------------------
+// Rekomendasi intervensi dan tindak lanjut.
+
+model Intervention {
+  id           String             @id @default(cuid())
+  patientId    String
+  patient      Patient            @relation(fields: [patientId], references: [id], onDelete: Cascade)
+  screeningId  String?
+  screening    Screening?         @relation(fields: [screeningId], references: [id], onDelete: SetNull)
+  assignedToId String?
+  assignedTo   User?              @relation(fields: [assignedToId], references: [id], onDelete: SetNull)
+
+  type         String             // mis. "KONSELING", "KUNJUNGAN_RUMAH", "PSIKOEDUKASI"
+  title        String
+  description  String?
+  status       InterventionStatus @default(PLANNED)
+  dueDate      DateTime?
+  completedAt  DateTime?
+  outcome      String?
+  createdAt    DateTime           @default(now())
+  updatedAt    DateTime           @updatedAt
+
+  @@index([patientId, status])
+  @@index([dueDate])
+}
+
+// --------------------------- MODUL 9 -----------------------------
+// Rujukan ke fasilitas kesehatan lanjutan (closed-loop).
+
+model Referral {
+  id              String         @id @default(cuid())
+  patientId       String
+  patient         Patient        @relation(fields: [patientId], references: [id], onDelete: Cascade)
+  screeningId     String?
+  screening       Screening?     @relation(fields: [screeningId], references: [id], onDelete: SetNull)
+  createdById     String
+  createdBy       User           @relation(fields: [createdById], references: [id])
+
+  originFacilityId      String?
+  originFacility        Facility? @relation("ReferralOrigin", fields: [originFacilityId], references: [id], onDelete: SetNull)
+  destinationFacilityId String?
+  destinationFacility   Facility? @relation("ReferralDestination", fields: [destinationFacilityId], references: [id], onDelete: SetNull)
+
+  reason          String
+  status          ReferralStatus @default(DRAFT)
+  urgent          Boolean        @default(false)
+  sentAt          DateTime?
+  acceptedAt      DateTime?
+  closedAt        DateTime?
+  feedback        String?
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+
+  @@index([patientId])
+  @@index([status, urgent])
+}
+
+// --------------------------- MODUL 10 ----------------------------
+// Monitoring dan reminder.
+
+model Reminder {
+  id          String          @id @default(cuid())
+  patientId   String
+  patient     Patient         @relation(fields: [patientId], references: [id], onDelete: Cascade)
+  channel     ReminderChannel @default(WHATSAPP)
+  status      ReminderStatus  @default(SCHEDULED)
+  title       String
+  message     String
+  scheduledAt DateTime
+  sentAt      DateTime?
+  error       String?
+  externalId  String? // id pesan dari gateway
+  createdAt   DateTime        @default(now())
+  updatedAt   DateTime        @updatedAt
+
+  @@index([status, scheduledAt])
+  @@index([patientId])
+}
+
+// ------------------------- MODUL 13 ------------------------------
+// Audit log (mutasi data sensitif) + activity log (jejak aktivitas).
+
+model AuditLog {
+  id         String   @id @default(cuid())
+  userId     String?
+  user       User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  action     String   // CREATE | UPDATE | DELETE | LOGIN | EXPORT | ...
+  entity     String   // nama tabel/agregat
+  entityId   String?
+  before     Json?
+  after      Json?
+  ipAddress  String?
+  userAgent  String?
+  createdAt  DateTime @default(now())
+
+  @@index([entity, entityId])
+  @@index([userId, createdAt])
+}
+
+model ActivityLog {
+  id        String   @id @default(cuid())
+  userId    String?
+  user      User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  type      String   // mis. "HIGH_ALERT", "SCREENING_SUBMITTED", "REFERRAL_CLOSED"
+  message   String
+  meta      Json?
+  createdAt DateTime @default(now())
+
+  @@index([type, createdAt])
+}
+
+// ------------------------- MODUL 14 ------------------------------
+// Pengaturan sistem (key-value bertipe).
+
+model Setting {
+  key       String   @id
+  value     Json
+  category  String   @default("general")
+  updatedAt DateTime @updatedAt
+}
+
+// ------------------------- MODUL 15 ------------------------------
+// Log integrasi eksternal (SATUSEHAT / BPJS / WhatsApp).
+
+model IntegrationLog {
+  id         String               @id @default(cuid())
+  provider   IntegrationProvider
+  operation  String               // mis. "PUSH_OBSERVATION", "SEND_MESSAGE", "CHECK_PESERTA"
+  status     IntegrationLogStatus
+  request    Json?
+  response   Json?
+  refType    String?              // entitas terkait (Patient/Screening/Reminder)
+  refId      String?
+  durationMs Int?
+  createdAt  DateTime             @default(now())
+
+  @@index([provider, status])
+  @@index([refType, refId])
+}
