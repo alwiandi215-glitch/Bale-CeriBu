@@ -1,25 +1,13 @@
-# Konfigurasi deploy Netlify (standar GitHub → Netlify untuk Next.js 15 App Router / SSR).
-# Netlify mendeteksi situs Next.js dan memasang @netlify/plugin-nextjs secara otomatis.
-
 [build]
   command = "npm run build"
-  publish = ".next"
+  publish = "dist"
 
 [build.environment]
-  NODE_VERSION = "20"
-  # Pastikan Prisma Client ter-generate saat build di Netlify.
-  PRISMA_GENERATE_DATAPROXY = "false"
-  NPM_FLAGS = "--legacy-peer-deps"
+  NODE_VERSION = "18"
 
-[[plugins]]
-  package = "@netlify/plugin-nextjs"
-
-# Header keamanan dasar (lihat docs/SECURITY.md untuk CSP lengkap).
-[[headers]]
-  for = "/*"
-  [headers.values]
-    X-Frame-Options = "DENY"
-    X-Content-Type-Options = "nosniff"
-    Referrer-Policy = "strict-origin-when-cross-origin"
-    Permissions-Policy = "camera=(), microphone=(), geolocation=()"
-    Strict-Transport-Security = "max-age=63072000; includeSubDomains; preload"
+# SPA fallback: semua rute diarahkan ke index.html agar React Router
+# tidak menghasilkan 404 saat halaman di-refresh / diakses langsung.
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200
