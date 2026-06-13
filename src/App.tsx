@@ -19,6 +19,7 @@ const PatientsPage = lazy(() => import('@/features/patients/pages/PatientsPage')
 const MonitoringPage = lazy(() => import('@/features/monitoring/pages/MonitoringPage'));
 const ReportsPage = lazy(() => import('@/features/reports/pages/ReportsPage'));
 const EducationListPage = lazy(() => import('@/features/education/pages/EducationListPage'));
+const EducationDetailPage = lazy(() => import('@/features/education/pages/EducationDetailPage'));
 const SettingsPage = lazy(() => import('@/features/settings/pages/SettingsPage'));
 
 const NAV = [
@@ -77,6 +78,7 @@ function AppShell() {
               <Route path="/monitoring" element={<MonitoringPage />} />
               <Route path="/reports" element={<ReportsPage />} />
               <Route path="/education" element={<EducationListPage />} />
+              <Route path="/education/:id" element={<EducationDetailPage />} />
               <Route path="/settings" element={<SettingsPage />} />
               <Route path="*" element={<Navigate to="/dashboard" replace />} />
             </Routes>
